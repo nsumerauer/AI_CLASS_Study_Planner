@@ -1,0 +1,18 @@
+{
+  "week_of": "2026-04-20",
+  "daily_study_hours": {
+    "Monday": 2.0,
+    "Tuesday": 2.0,
+    "Wednesday": 1.5,
+    "Thursday": 2.0,
+    "Friday": 1.0,
+    "Saturday": 4.0,
+    "Sunday": 4.0
+  },
+  "tasks": [
+    { "name": "Biology lab report", "due": "2026-04-23", "hours_needed": 5 },
+    { "name": "Statistics problem set", "due": "2026-04-25", "hours_needed": 4 },
+    { "name": "History reading quiz", "due": "2026-04-27", "hours_needed": 2 },
+    { "name": "Physics midterm", "due": "2026-05-02", "hours_needed": 12 }
+  ]
+}
