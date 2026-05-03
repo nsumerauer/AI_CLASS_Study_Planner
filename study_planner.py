@@ -6,402 +6,378 @@ Generates a personalized weekly study schedule based on:
 • Tasks (assignments, exams, projects) with due dates  
 • Estimated hours needed for each task  
 • Daily study availability (after work / classes)  
-• A greedy optimization algorithm that prioritizes urgent tasks  
-
-This version supports:
-- Interactive terminal input OR JSON config file
-- Due date scheduling
-- Automatic weekly start calculation
-- Tabular output with warnings for under‑allocation
-- Only Python standard library (no external dependencies)
+• A greedy optimization algorithm that prioritizes urgent tasks
 """
-
+  
 from __future__ import annotations
 
-import argparse
 import json
-import sys
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List, Tuple
 
-
-# Days of the week in fixed order — used for iteration and table formatting
+# Fixed weekday ordering for iteration and schedule construction
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+DAY_INDEX = {day: idx for idx, day in enumerate(WEEKDAYS)}
 
 
 # ------------------------------------------------------------
-# Date Parsing Utilities
-# ------------------------------------------------------------
-
-def parse_date(s: str) -> date:
-    """
-    Parse a date string in multiple common formats.
-    Accepted formats:
-        YYYY-MM-DD
-        MM/DD/YYYY
-        DD/MM/YYYY
-    """
-    s = s.strip()
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    raise ValueError(f"Unrecognized date: {s!r}. Use YYYY-MM-DD, MM/DD/YYYY, or DD/MM/YYYY.")
-
-
-def week_start_on(d: date, start_on_monday: bool = True) -> date:
-    """
-    Given any date, return the Monday (or Sunday) of that calendar week.
-    Useful for anchoring the weekly schedule.
-    """
-    if start_on_monday:
-        return d - timedelta(days=d.weekday())
-    # Sunday-start week
-    return d - timedelta(days=(d.weekday() + 1) % 7)
-
-
-# ------------------------------------------------------------
-# Data Models
+# Task Model
 # ------------------------------------------------------------
 
 @dataclass
 class Task:
     """
-    Represents a study task such as an assignment, exam, or project.
+    Represents a study task with:
+        - name
+        - total hours required
+        - optional due date
+        - optional priority weight
 
-    Attributes:
-        name: Name of the task.
-        due: Due date of the task.
-        hours_needed: Estimated total hours required to complete it.
+    The 'priority' field allows the user to manually weight tasks
+    (e.g., exams > homework), which influences the optimization.
     """
-
     name: str
-    due: date
-    hours_needed: float = 3.0
-
-    def days_until(self, from_day: date) -> int:
-        """Return number of days until due date (0 if due today or overdue)."""
-        return max(0, (self.due - from_day).days)
-
-
-@dataclass
-class WeekPlan:
-    """
-    Represents the final weekly schedule.
-
-    Attributes:
-        week_of: Monday of the week being planned.
-        daily_capacity: Dict mapping weekday → available hours.
-        allocation: Nested dict mapping task → day → hours assigned.
-    """
-
-    week_of: date
-    daily_capacity: dict[str, float]
-    allocation: dict[str, dict[str, float]] = field(default_factory=dict)
-
-    def total_allocated(self, task: str) -> float:
-        """Total hours allocated to a given task across the week."""
-        return sum(self.allocation.get(task, {}).values())
-
-    def day_total(self, day: str) -> float:
-        """Total hours allocated on a given day across all tasks."""
-        return sum(t.get(day, 0.0) for t in self.allocation.values())
+    hours_needed: float
+    due: date | None = None
+    priority: float = 1.0
 
 
 # ------------------------------------------------------------
-# Priority Function
+# Week Utilities
 # ------------------------------------------------------------
 
-def _priority_score(task: Task, day: date) -> float:
-    """
-    Compute a priority score for a task on a given day.
-
-    Higher score = more deserving of time today.
-
-    Logic:
-        - Tasks due today get extremely high priority.
-        - Otherwise, priority decreases with distance from due date.
-        - Larger tasks (more hours_needed) get higher weight.
-    """
-    d = task.days_until(day)
-    if d == 0:
-        # Extremely urgent — force heavy allocation
-        return task.hours_needed * 1_000.0
-
-    # Softer urgency curve: closer deadlines get higher priority
-    return task.hours_needed / (d**1.5 + 0.5)
+def start_of_week(any_day: date) -> date:
+    """Return the Monday of the week containing 'any_day'."""
+    return any_day - timedelta(days=any_day.weekday())
 
 
 # ------------------------------------------------------------
-# Scheduling Algorithm
+# Priority / Objective Function
 # ------------------------------------------------------------
 
-def generate_weekly_plan(
-    week_start: date,
-    tasks: Iterable[Task],
-    daily_hours: dict[str, float],
-) -> WeekPlan:
+def _task_sort_key(task: Task, week_start: date) -> Tuple[float, int, float]:
     """
-    Core greedy scheduling algorithm.
+    Defines the *implicit objective function* for the greedy optimizer.
 
-    For each day:
-        1. Determine available hours.
-        2. Identify tasks that are still active (not overdue, not completed).
-        3. Compute priority scores for each active task.
-        4. Allocate small "slices" of time (0.5h max per iteration)
-           proportionally to priority scores.
-        5. Continue until the day's hours are used or all tasks are satisfied.
+    Tasks are sorted by:
+        1. Higher priority weight (user-defined importance)
+        2. Earlier due date (urgency)
+        3. Larger hours_needed (bigger tasks first)
 
-    This produces a smooth, human-like distribution of study time.
+    This ordering encodes the optimization goal:
+        → minimize lateness and maximize timely completion
+    """
+    due_offset = 999 if task.due is None else max(0, (task.due - week_start).days)
+    return (-task.priority, due_offset, -task.hours_needed)
+
+
+# ------------------------------------------------------------
+# Input Validation / Constraints
+# ------------------------------------------------------------
+
+def _normalize_daily_hours(daily_hours: Dict[str, float]) -> Dict[str, float]:
+    """
+    Ensures daily availability is valid and non-negative.
+
+    Constraint enforced:
+        available_hours[d] >= 0
+    """
+    normalized: Dict[str, float] = {}
+    for day_name in WEEKDAYS:
+        raw_value = daily_hours.get(day_name, 0.0)
+        value = float(raw_value)
+        if value < 0:
+            raise ValueError(f"Daily study hours cannot be negative for {day_name}.")
+        normalized[day_name] = value
+    return normalized
+
+
+def _validate_tasks(tasks: List[Task]) -> None:
+    """
+    Validates task constraints:
+        - name must be non-empty
+        - hours_needed > 0
+        - priority > 0
+        - no duplicate task names
+    """
+    seen_names = set()
+    for task in tasks:
+        if not task.name or not task.name.strip():
+            raise ValueError("Task names must be non-empty.")
+        if task.hours_needed <= 0:
+            raise ValueError(f"Task '{task.name}' must have positive hours_needed.")
+        if task.priority <= 0:
+            raise ValueError(f"Task '{task.name}' must have positive priority.")
+        if task.name in seen_names:
+            raise ValueError(f"Duplicate task name detected: '{task.name}'.")
+        seen_names.add(task.name)
+
+
+<<<<<<< HEAD
+# ------------------------------------------------------------
+# Greedy Scheduling Algorithm (Optimization Engine)
+# ------------------------------------------------------------
+=======
+def _due_index(task: Task, week_start: date) -> int:
+    if task.due is None:
+        return len(WEEKDAYS) - 1
+    return min(max((task.due - week_start).days, 0), len(WEEKDAYS) - 1)
+
+
+def evaluate_objective(plan: Dict[str, Dict[str, float]], tasks: List[Task], week_start: date) -> Dict[str, float]:
+    """
+    Objective function that scores a complete candidate solution.
+
+    Higher is better. The score rewards weighted on-time completion most heavily,
+    gives smaller credit for total completion, and penalizes late allocation.
+    """
+    score = 0.0
+    weighted_on_time_completion = 0.0
+    weighted_total_completion = 0.0
+    late_hours_penalty = 0.0
+
+    for task in tasks:
+        total_alloc = 0.0
+        on_time_alloc = 0.0
+        due_idx = _due_index(task, week_start)
+        for day_name, day_plan in plan.items():
+            allocated = float(day_plan.get(task.name, 0.0))
+            total_alloc += allocated
+            if DAY_INDEX[day_name] <= due_idx:
+                on_time_alloc += allocated
+
+        on_time_ratio = min(on_time_alloc / task.hours_needed, 1.0)
+        completion_ratio = min(total_alloc / task.hours_needed, 1.0)
+        late_hours = max(0.0, total_alloc - on_time_alloc)
+
+        weighted_on_time_completion += task.priority * on_time_ratio
+        weighted_total_completion += task.priority * completion_ratio
+        late_hours_penalty += late_hours
+
+        # Strongly prefer on-time completion for high-priority tasks.
+        score += task.priority * (5.0 * on_time_ratio + 2.0 * completion_ratio) - 1.5 * late_hours
+
+    return {
+        "objective_score": round(score, 4),
+        "weighted_on_time_completion": round(weighted_on_time_completion, 4),
+        "weighted_total_completion": round(weighted_total_completion, 4),
+        "late_hours_penalty": round(late_hours_penalty, 4),
+    }
+
+>>>>>>> 094080e9523a2f31b502dd26b631a50e1bd8c3f5
+
+def build_plan(tasks: Iterable[Task], daily_hours: Dict[str, float], week_of: date | None = None):
+    """
+    Core greedy optimization algorithm.
+
+    Decision variable:
+        x[t, d] = hours allocated to task t on day d
+        → represented in code as: plan[day_name][task.name]
+
+    Objective (implicit):
+        Minimize lateness by allocating hours to:
+            - higher priority tasks
+            - earlier-due tasks
+            - larger tasks
+        This is encoded through the sorting key.
+
+    Constraints enforced:
+        1. Daily hour limit:
+            sum_t x[t, d] <= available_hours[d]
+        2. Task completion:
+            sum_d x[t, d] = hours_needed[t]
+        3. Deadline constraint:
+            x[t, d] = 0 if d > due_date[t]
+        4. Non-negativity:
+            x[t, d] >= 0
     """
 
-    tasks = list(tasks)
-    remaining = {t.name: float(t.hours_needed) for t in tasks}
+    # Determine the week to schedule
+    effective_week = week_of or start_of_week(date.today())
 
-    # Initialize allocation table: task → day → hours
-    allocation = {t.name: {d: 0.0 for d in WEEKDAYS} for t in tasks}
+    # Validate and prepare tasks
+    task_list = list(tasks)
+    _validate_tasks(task_list)
 
+    # Normalize daily availability
+    normalized_daily_hours = _normalize_daily_hours(daily_hours)
+
+    # Sort tasks according to the optimization objective
+    ordered_tasks = sorted(task_list, key=lambda t: _task_sort_key(t, effective_week))
+
+    # Track remaining hours for each task
+    remaining = {task.name: float(task.hours_needed) for task in ordered_tasks}
+
+    # Decision variable container: plan[day][task] = hours allocated
+    plan: Dict[str, Dict[str, float]] = {day: {} for day in WEEKDAYS}
+    remaining_day = {day: float(hours) for day, hours in normalized_daily_hours.items()}
+    step_size = 0.5
+
+<<<<<<< HEAD
     # Iterate through each day of the week
-    for i, day_name in enumerate(WEEKDAYS):
-        day = week_start + timedelta(days=i)
-        cap = max(0.0, float(daily_hours.get(day_name, 0.0)))
-        left = cap  # Remaining hours for this day
+    for day_idx, day_name in enumerate(WEEKDAYS):
+        available = normalized_daily_hours[day_name]
 
-        # Filter tasks that are still relevant
-        active = [
-            t for t in tasks
-            if t.due >= week_start and day <= t.due and remaining[t.name] > 1e-6
-        ]
+        # If no hours available today, skip
+        if available <= 0:
+            continue
 
-        # Allocate time in small slices for smoother distribution
-        while left > 1e-6 and active:
-            scores = [(t, _priority_score(t, day)) for t in active]
-            total = sum(s for _, s in scores) or 1.0
+        day_date = effective_week + timedelta(days=day_idx)
 
-            # Small step size prevents one task from hogging the day
-            step = min(left, 0.5)
+        # Identify tasks eligible for scheduling today
+        eligible_tasks: List[Task] = []
+        for task in ordered_tasks:
+            if remaining[task.name] <= 0:
+                continue
+            # Deadline constraint: only schedule tasks not yet overdue
+            if task.due is None or task.due >= day_date:
+                eligible_tasks.append(task)
 
-            for t, s in scores:
-                if left <= 1e-6:
-                    break
+        # If no eligible tasks (rare), fall back to any remaining tasks
+        if not eligible_tasks:
+            eligible_tasks = [task for task in ordered_tasks if remaining[task.name] > 0]
 
-                # Proportional share of the step
-                share = step * (s / total)
-                take = min(share, remaining[t.name], left)
+        # Greedy allocation loop
+        for task in eligible_tasks:
+            if available <= 0:
+                break
 
-                if take <= 1e-9:
+            # Allocate as much as possible without violating constraints
+            take = min(available, remaining[task.name])
+            if take <= 0:
+                continue
+
+            # Decision variable assignment: x[t, d] = take
+            plan[day_name][task.name] = round(plan[day_name].get(task.name, 0.0) + take, 2)
+
+            # Update remaining hours and daily capacity
+            remaining[task.name] = round(remaining[task.name] - take, 2)
+            available = round(available - take, 2)
+=======
+    while True:
+        if not any(hours > 0 for hours in remaining_day.values()):
+            break
+        if not any(hours > 0 for hours in remaining.values()):
+            break
+
+        base_score = evaluate_objective(plan, ordered_tasks, effective_week)["objective_score"]
+        best_move: Tuple[float, str, Task, float] | None = None
+
+        for day_name in WEEKDAYS:
+            available = remaining_day[day_name]
+            if available <= 0:
+                continue
+            for task in ordered_tasks:
+                if remaining[task.name] <= 0:
+                    continue
+                take = min(step_size, available, remaining[task.name])
+                if take <= 0:
                     continue
 
-                allocation[t.name][day_name] += take
-                remaining[t.name] -= take
-                left -= take
+                candidate_plan = {d: allocations.copy() for d, allocations in plan.items()}
+                candidate_plan[day_name][task.name] = round(candidate_plan[day_name].get(task.name, 0.0) + take, 2)
+                candidate_score = evaluate_objective(candidate_plan, ordered_tasks, effective_week)["objective_score"]
+                gain = round(candidate_score - base_score, 6)
 
-            # Recompute active tasks after each slice
-            active = [
-                t for t in tasks
-                if t.due >= week_start and day <= t.due and remaining[t.name] > 1e-6
-            ]
+                if best_move is None or gain > best_move[0]:
+                    best_move = (gain, day_name, task, take)
 
-    return WeekPlan(week_of=week_start, daily_capacity=dict(daily_hours), allocation=allocation)
+        if best_move is None:
+            break
+        if best_move[0] <= 0:
+            # No move improves the objective further.
+            break
 
+        _, best_day, best_task, best_take = best_move
+        plan[best_day][best_task.name] = round(plan[best_day].get(best_task.name, 0.0) + best_take, 2)
+        remaining[best_task.name] = round(remaining[best_task.name] - best_take, 2)
+        remaining_day[best_day] = round(remaining_day[best_day] - best_take, 2)
+>>>>>>> 094080e9523a2f31b502dd26b631a50e1bd8c3f5
 
-# ------------------------------------------------------------
-# Output Formatting
-# ------------------------------------------------------------
+    # Compute summary metrics
+    total_requested_hours = round(sum(task.hours_needed for task in ordered_tasks), 2)
+    total_available_hours = round(sum(normalized_daily_hours.values()), 2)
+    total_unallocated = round(sum(hours for hours in remaining.values() if hours > 0), 2)
+    total_allocated = round(total_requested_hours - total_unallocated, 2)
+    allocation_rate = 0.0 if total_requested_hours == 0 else round(total_allocated / total_requested_hours, 4)
+    objective_metrics = evaluate_objective(plan, ordered_tasks, effective_week)
 
-def print_plan(plan: WeekPlan, tasks: list[Task]) -> None:
-    """
-    Print the weekly plan in a clean, readable table.
-    Includes:
-        - Hours per task per day
-        - Totals
-        - Warnings for under-allocated tasks
-    """
-
-    print(f"\nStudy plan for week of {plan.week_of.isoformat()} (Mon–Sun)\n")
-
-    header = f"{'Task':<28}" + "".join(f"{d[:3]:>4}" for d in WEEKDAYS) + f"{'Tot':>6}"
-    print(header)
-    print("-" * len(header))
-
-    by_name = {t.name: t for t in tasks}
-
-    # Print each task row, sorted by due date then name
-    for name in sorted(plan.allocation.keys(), key=lambda n: (by_name[n].due, n)):
-        row = plan.allocation[name]
-        cells = "".join(
-            f"{row[d]:>4.1f}" if row[d] > 0 else f"{'—':>4}"
-            for d in WEEKDAYS
-        )
-        tot = plan.total_allocated(name)
-        due = by_name[name].due.isoformat()
-        print(f"{name[:26]:<28}{cells}{tot:>6.1f}  (due {due})")
-
-    print("-" * len(header))
-
-    # Daily totals
-    cap = "".join(f"{plan.daily_capacity.get(d, 0):>4.1f}" for d in WEEKDAYS)
-    used = "".join(f"{plan.day_total(d):>4.1f}" for d in WEEKDAYS)
-
-    print(f"{'Capacity (h)':<28}{cap}{sum(plan.daily_capacity.values()):>6.1f}")
-    print(f"{'Allocated (h)':<28}{used}{sum(plan.day_total(d) for d in WEEKDAYS):>6.1f}")
-
-    # Under-allocation warnings
-    short = []
-    for t in tasks:
-        got = plan.total_allocated(t.name)
-        if got + 1e-3 < t.hours_needed:
-            short.append((t.name, t.hours_needed - got))
-
-    if short:
-        print("\nNote: weekly capacity was not enough to cover all estimated hours.")
-        for n, gap in sorted(short, key=lambda x: -x[1]):
-            print(f"  • {n}: about {gap:.1f} h still unscheduled this week.")
+    return {
+        "week_of": effective_week.isoformat(),
+        "plan": plan,
+        "unallocated_hours": {name: hours for hours in remaining.items() if hours > 0},
+        "metrics": {
+            "total_requested_hours": total_requested_hours,
+            "total_available_hours": total_available_hours,
+            "total_allocated_hours": total_allocated,
+            "allocation_rate": allocation_rate,
+            "objective_score": objective_metrics["objective_score"],
+            "weighted_on_time_completion": objective_metrics["weighted_on_time_completion"],
+            "weighted_total_completion": objective_metrics["weighted_total_completion"],
+            "late_hours_penalty": objective_metrics["late_hours_penalty"],
+        },
+    }
 
 
 # ------------------------------------------------------------
 # Config Loading
 # ------------------------------------------------------------
 
-def load_config(path: Path) -> tuple[date, dict[str, float], list[Task]]:
-    """
-    Load configuration from a JSON file.
+def load_config(config_path: str):
+    """Load tasks, availability, and week start from a JSON config file."""
+    raw = Path(config_path).read_text(encoding="utf-8")
+    payload = json.loads(raw)
 
-    Expected structure:
-    {
-        "week_of": "2025-04-20",
-        "daily_study_hours": { "Monday": 2, ... },
-        "tasks": [
-            {"name": "Exam", "due": "2025-04-25", "hours_needed": 6}
-        ]
-    }
-    """
-    data = json.loads(path.read_text(encoding="utf-8"))
-
-    week_of = parse_date(data["week_of"])
-    week_start = week_start_on(week_of)
-
-    daily = data.get("daily_study_hours", {})
-    missing = [d for d in WEEKDAYS if d not in daily]
-    if missing:
-        raise ValueError(f"daily_study_hours missing keys: {missing}")
+    week_of = date.fromisoformat(payload["week_of"]) if payload.get("week_of") else None
+    daily_hours = payload.get("daily_study_hours", {})
 
     tasks = [
         Task(
             name=item["name"],
-            due=parse_date(item["due"]),
-            hours_needed=float(item.get("hours_needed", 3)),
+            hours_needed=float(item["hours_needed"]),
+            due=date.fromisoformat(item["due"]) if item.get("due") else None,
+            priority=float(item.get("priority", 1.0)),
         )
-        for item in data.get("tasks", [])
+        for item in payload.get("tasks", [])
     ]
 
-    if not tasks:
-        raise ValueError("config must include a non-empty 'tasks' list")
-
-    return week_start, daily, tasks
+    return tasks, daily_hours, week_of
 
 
 # ------------------------------------------------------------
-# Interactive Input Mode
+# Output Formatting
 # ------------------------------------------------------------
 
-def interactive_config() -> tuple[date, dict[str, float], list[Task]]:
-    """
-    Prompt the user for all required scheduling information:
-        - Week to plan
-        - Daily availability
-        - Tasks with due dates and estimated hours
-    """
+def print_plan(result):
+    """Pretty-print the weekly plan."""
+    print("\nWeekly Study Plan\n")
+    for day in WEEKDAYS:
+        print(f"{day}:")
+        day_plan = result["plan"][day]
+        if not day_plan:
+            print("  (no study)")
+        else:
+            for task, hrs in day_plan.items():
+                print(f"  {task}: {hrs:.1f}h")
+        print()
 
-    print("Study planner — enter your week, availability, and tasks.\n")
-
-    raw = input("Week to plan (any date in that week, YYYY-MM-DD) [default: today]: ").strip()
-    anchor = parse_date(raw) if raw else date.today()
-    week_start = week_start_on(anchor)
-    print(f"Using week starting Monday {week_start.isoformat()}.\n")
-
-    print("Study hours available each day (after work / other commitments):")
-    daily = {}
-    for d in WEEKDAYS:
-        s = input(f"  {d} (hours) [0]: ").strip()
-        daily[d] = float(s) if s else 0.0
-
-    tasks = []
-    print("\nTasks (blank name to finish).")
-    while True:
-        name = input("Task name (e.g. Calc midterm): ").strip()
-        if not name:
-            break
-
-        # Keep asking until the user enters a valid date
-        while True:
-            due_s = input("  Due date (YYYY-MM-DD): ").strip()
-            try:
-                due = parse_date(due_s)
-                break
-            except ValueError as e:
-                print(f"    Invalid date: {e}. Please try again.")
-
-        h_s = input("  Estimated study hours [3]: ").strip()
-        h = float(h_s) if h_s else 3.0
-
-        tasks.append(Task(name=name, due=due, hours_needed=h))
-
-    if not tasks:
-        print("No tasks entered.", file=sys.stderr)
-        sys.exit(1)
-
-    return week_start, daily, tasks
+    if result["unallocated_hours"]:
+        print("Unallocated hours (increase daily availability to fit all work):")
+        for task, hrs in result["unallocated_hours"].items():
+            print(f"  {task}: {hrs:.1f}h")
 
 
 # ------------------------------------------------------------
 # Main Entry Point
 # ------------------------------------------------------------
 
-def main() -> None:
-    """
-    Entry point for the CLI tool.
-    Supports:
-        --config <file.json>  → load from JSON
-        (no args)             → interactive mode
-    """
-
-    parser = argparse.ArgumentParser(
-        description="Generate a weekly study plan from due dates and availability."
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        help="JSON file with week_of, daily_study_hours, tasks",
-    )
-    args = parser.parse_args()
-
-    # Load config or prompt interactively
-    if args.config:
-        week_start, daily, tasks = load_config(args.config)
-    else:
-        week_start, daily, tasks = interactive_config()
-
-    # Filter tasks based on due date
-    skipped = [t for t in tasks if t.due < week_start]
-    active = [t for t in tasks if t.due >= week_start]
-
-    if skipped:
-        print("Skipping tasks already due before this week:", file=sys.stderr)
-        for t in skipped:
-            print(f"  • {t.name} (was due {t.due.isoformat()})", file=sys.stderr)
-        print(file=sys.stderr)
-
-    if not active:
-        print("No tasks due on or after the start of this week.", file=sys.stderr)
-        sys.exit(1)
-
-    # Generate and print the plan
-    plan = generate_weekly_plan(week_start, active, daily)
-    print_plan(plan, active)
+def main():
+    """Load config, run optimizer, print results."""
+    tasks, daily_hours, week_of = load_config("example_config.json")
+    result = build_plan(tasks, daily_hours, week_of)
+    print_plan(result)
 
 
 if __name__ == "__main__":
