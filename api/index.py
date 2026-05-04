@@ -21,10 +21,10 @@ DEFAULT_PAYLOAD = {
         "Sunday": 4,
     },
     "tasks": [
-        {"name": "Biology lab report", "due": "2026-04-23", "hours_needed": 5, "priority": 1},
-        {"name": "Statistics problem set", "due": "2026-04-25", "hours_needed": 4, "priority": 1},
-        {"name": "History reading quiz", "due": "2026-04-27", "hours_needed": 2, "priority": 1.2},
-        {"name": "Physics midterm", "due": "2026-05-02", "hours_needed": 12, "priority": 2},
+        {"name": "Biology lab report", "due": "2026-04-23", "hours_needed": 5},
+        {"name": "Statistics problem set", "due": "2026-04-25", "hours_needed": 4},
+        {"name": "History reading quiz", "due": "2026-04-27", "hours_needed": 2},
+        {"name": "Physics midterm", "due": "2026-05-02", "hours_needed": 12},
     ],
 }
 
@@ -38,6 +38,7 @@ def home():
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Weekly study planner: optimize task hours across your available days with mixed-integer optimization." />
   <title>Study Planner</title>
   <style>
     :root {
@@ -333,7 +334,7 @@ def home():
         <h3 class="section-title" style="margin-top:14px;">Your Tasks</h3>
         <table>
           <thead>
-            <tr><th>Task</th><th>Due Date</th><th>Hours</th><th>Priority</th><th></th></tr>
+            <tr><th>Task</th><th>Due Date</th><th>Hours</th><th></th></tr>
           </thead>
           <tbody id="taskRows"></tbody>
         </table>
@@ -341,7 +342,7 @@ def home():
           <button type="button" class="secondary" id="addTask">+ Add Task</button>
           <button type="button" id="run">Make My Plan</button>
           <button type="button" class="secondary" id="reset">Reset Defaults</button>
-          <span class="status" id="status">Ready</span>
+          <span class="status" id="status" role="status" aria-live="polite">Ready</span>
         </div>
       </section>
       <section class="card schedule-panel">
@@ -354,6 +355,13 @@ def home():
         <div id="planOutput" class="muted">Click Make My Plan to generate your optimized schedule.</div>
       </section>
     </div>
+    <footer class="card" style="margin-top:18px;padding:14px 16px;">
+      <p style="margin:0;font-size:13px;color:var(--text-muted);">
+        <strong id="footerLead" style="color:var(--text-main);">Production demo:</strong>
+        <a href="https://aifinal-phi.vercel.app" style="color:var(--accent-strong);">aifinal-phi.vercel.app</a>
+        · <a id="footerSource" href="https://github.com/Veloxinfestus/ai_final_project" style="color:var(--accent-strong);">Source on GitHub</a>
+      </p>
+    </footer>
   </main>
   <script>
     const starter = {{ starter | safe }};
@@ -389,7 +397,6 @@ def home():
         thTask: "Task",
         thDue: "Due Date",
         thHours: "Hours",
-        thPriority: "Priority",
         addTask: "+ Add Task",
         run: "Make My Plan",
         reset: "Reset Defaults",
@@ -401,6 +408,7 @@ def home():
         optimization: "Optimization Result:",
         summaryLine: (allocated, requested, rate) =>
           `${allocated.toFixed(1)}h allocated out of ${requested.toFixed(1)}h requested (${rate.toFixed(0)}% allocation rate).`,
+        objectiveLine: (score) => `Objective score: ${score.toFixed(2)} (higher is better).`,
         restDay: "(rest day)",
         unallocatedTitle: "Unallocated Hours",
         allFit: "Everything fits beautifully this week.",
@@ -416,12 +424,14 @@ def home():
         optionSunset: "Sunset",
         optionRainbow: "Rainbow Sparkle",
         optionAlien: "Xor'vii Zha",
+        footerLead: "Production demo:",
+        footerSource: "Source on GitHub",
         requestFailed: "Request failed",
       },
       alien: {
         title: "Xyr'qall Vriin",
         subtitle: "Zor'kai thul vekra zyn doq ul'var neth krii xall.",
-        themeLabel: "Thii'me",
+        themeLabel: "Zha'kor",
         inputs: "Kraxx",
         weekOf: "Wex Tor",
         dailyHours: "Vhor Nylak",
@@ -429,7 +439,6 @@ def home():
         thTask: "Drav",
         thDue: "Zhaq",
         thHours: "Ruu",
-        thPriority: "Qir",
         addTask: "+ Zek Drav",
         run: "Vrii'k Nax",
         reset: "Klor Nul",
@@ -438,9 +447,10 @@ def home():
         mSlots: "Qir Vox",
         mUnalloc: "Ruu Neth",
         initialPlan: "Vrii'k Nax tor zyn'korr.",
-        optimization: "Qorr Vex:",
+        optimization: "Mek'tir Qorr Vex:",
         summaryLine: (allocated, requested, rate) =>
           `${allocated.toFixed(1)}ruu vex ${requested.toFixed(1)}ruu qorr (${rate.toFixed(0)}% qir-vra).`,
+        objectiveLine: (score) => `Qorr-skor: ${score.toFixed(2)} (ul-vrax).`,
         restDay: "(nul-vor)",
         unallocatedTitle: "Ruu Neth",
         allFit: "Zyn qorr vexa nul.",
@@ -451,11 +461,13 @@ def home():
         noTaskError: "Zek drav ruu.",
         remove: "Nulx",
         taskPlaceholder: "Drav-zen",
-        optionModern: "Modr-Xi",
+        optionModern: "Mo'dra",
         optionMidnight: "Nok'th",
-        optionSunset: "Sur'zet",
-        optionRainbow: "Raen'bo",
+        optionSunset: "Sul'tra",
+        optionRainbow: "Rai'vok",
         optionAlien: "Xor'vii Zha",
+        footerLead: "Vrax'tol:",
+        footerSource: "Zhyr Qit'vra",
         requestFailed: "Neth-vra",
       },
     };
@@ -474,6 +486,7 @@ def home():
 
     function applyCopy() {
       const c = getUiCopy();
+      document.title = c.title;
       document.querySelector(".hero-copy h1").textContent = c.title;
       document.querySelector(".hero-copy p").textContent = c.subtitle;
       document.querySelector(".theme-switch label").textContent = c.themeLabel;
@@ -485,7 +498,6 @@ def home():
       headers[0].textContent = c.thTask;
       headers[1].textContent = c.thDue;
       headers[2].textContent = c.thHours;
-      headers[3].textContent = c.thPriority;
       addTaskBtn.textContent = c.addTask;
       runBtn.textContent = c.run;
       resetBtn.textContent = c.reset;
@@ -500,6 +512,8 @@ def home():
       opts[2].text = c.optionSunset;
       opts[3].text = c.optionRainbow;
       opts[4].text = c.optionAlien;
+      document.getElementById("footerLead").textContent = c.footerLead;
+      document.getElementById("footerSource").textContent = c.footerSource;
       taskRows.querySelectorAll("tr").forEach((tr) => {
         tr.querySelectorAll("input")[0].placeholder = c.taskPlaceholder;
         tr.querySelector(".removeBtn").textContent = c.remove;
@@ -531,14 +545,13 @@ def home():
       });
     }
 
-    function makeTaskRow(task = {name: "", due: "", hours_needed: 1, priority: 1}) {
+    function makeTaskRow(task = {name: "", due: "", hours_needed: 1}) {
       const c = getUiCopy();
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td><input type="text" placeholder="${c.taskPlaceholder}" value="${task.name ?? ""}" /></td>
         <td><input type="date" value="${task.due ?? ""}" /></td>
         <td><input type="number" min="0.5" step="0.5" value="${task.hours_needed ?? 1}" /></td>
-        <td><input type="number" min="0.1" step="0.1" value="${task.priority ?? 1}" /></td>
         <td><button type="button" class="secondary removeBtn">${c.remove}</button></td>
       `;
       tr.querySelector(".removeBtn").addEventListener("click", () => tr.remove());
@@ -569,13 +582,11 @@ def home():
 
       const tasks = Array.from(taskRows.querySelectorAll("tr"))
         .map((tr) => {
-          const [nameInput, dueInput, hrsInput, priorityInput] = tr.querySelectorAll("input");
-          const priorityValue = Number(priorityInput.value || 1);
+          const [nameInput, dueInput, hrsInput] = tr.querySelectorAll("input");
           return {
             name: (nameInput.value || "").trim(),
             due: dueInput.value || null,
             hours_needed: Number(hrsInput.value || 0),
-            priority: Number.isFinite(priorityValue) && priorityValue > 0 ? priorityValue : 1,
           };
         })
         .filter((t) => t.name && t.hours_needed > 0);
@@ -617,11 +628,13 @@ def home():
       const allocationRate = Number(metrics.allocation_rate || 0) * 100;
       const allocated = Number(metrics.total_allocated_hours || 0);
       const requested = Number(metrics.total_requested_hours || 0);
+      const objectiveScore = Number(metrics.objective_score || 0);
 
       planOutput.innerHTML = `
         <div class="schedule-summary">
           <strong>${c.optimization}</strong>
-          ${c.summaryLine(allocated, requested, allocationRate)}
+          ${c.summaryLine(allocated, requested, allocationRate)}<br />
+          ${c.objectiveLine(objectiveScore)}
         </div>
         ${daysHtml}
         <div class="day-block">
@@ -678,23 +691,51 @@ def health():
 
 @app.post("/api/plan")
 def plan():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"error": "Request body must be valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+
     week_of_raw = payload.get("week_of")
-    week_of = date.fromisoformat(week_of_raw) if week_of_raw else None
+    try:
+        week_of = date.fromisoformat(week_of_raw) if week_of_raw else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "week_of must be an ISO date string (YYYY-MM-DD)."}), 400
+
     daily_hours = payload.get("daily_study_hours", {})
+    if daily_hours is None:
+        daily_hours = {}
+    if not isinstance(daily_hours, dict):
+        return jsonify({"error": "daily_study_hours must be an object."}), 400
+
     tasks_payload = payload.get("tasks", [])
+    if tasks_payload is None:
+        tasks_payload = []
+    if not isinstance(tasks_payload, list):
+        return jsonify({"error": "tasks must be an array."}), 400
 
-    tasks = [
-        Task(
-            name=item["name"],
-            hours_needed=float(item["hours_needed"]),
-            due=date.fromisoformat(item["due"]) if item.get("due") else None,
-            priority=float(item.get("priority", 1.0)),
-        )
-        for item in tasks_payload
-    ]
+    tasks: list[Task] = []
+    for idx, item in enumerate(tasks_payload):
+        if not isinstance(item, dict):
+            return jsonify({"error": f"tasks[{idx}] must be an object."}), 400
+        try:
+            name = item["name"]
+            hours_needed = float(item["hours_needed"])
+            due_raw = item.get("due")
+            due = date.fromisoformat(due_raw) if due_raw else None
+        except KeyError as exc:
+            missing = exc.args[0]
+            return jsonify({"error": f"tasks[{idx}] is missing required field '{missing}'."}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": f"tasks[{idx}] has invalid types or date format (use YYYY-MM-DD)."}), 400
+        tasks.append(Task(name=name, hours_needed=hours_needed, due=due))
 
-    result = build_plan(tasks=tasks, daily_hours=daily_hours, week_of=week_of)
+    try:
+        result = build_plan(tasks=tasks, daily_hours=daily_hours, week_of=week_of)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     return jsonify(result)
 
 
